@@ -15,6 +15,12 @@ MoCA answers the question:
 ```bash
 pip install git+https://github.com/orian116/MoCA.git
 ```
+# Re-install latest version
+```bash
+pip install --force-reinstall --no-deps git+https://github.com/orian116/MoCA.git
+```
+
+
 # Recommended workflow
 
 ## 1. Inspect Feature Compatibility
