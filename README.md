@@ -19,6 +19,7 @@ pip install git+https://github.com/orian116/MoCA.git
 
 ## 1. Inspect Feature Compatibility
 
+```python
 from moca import plot_old_new_hist_overlays
 plot_old_new_hist_overlays(old_X, new_X, bins=60)
 
