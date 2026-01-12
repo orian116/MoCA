@@ -10,10 +10,11 @@ MoCA answers the question:
 
 “Which known morphological states does each new experimental condition most closely resemble?”
 
-## Install
+# Install
+
 ```bash
 pip install git+https://github.com/orian116/MoCA.git
-
+```
 # Recommended workflow
 
 ## 1. Inspect Feature Compatibility
