@@ -1,21 +1,19 @@
 
 # align_to_gold.py
 # Simple, generalizable alignment of NEW conditions to OLD gold-standard states
-# using Euclidean distance in PCA space (PCA & scaler fitted on OLD only).
+# using (optionally weighted) Euclidean distance in PCA space
+# (PCA & scaler fitted on OLD only).
 #
 # Dependencies: numpy, pandas, scikit-learn, matplotlib
 #
 # Usage (sketch):
 # from align_to_gold import align_conditions_to_states
-# results = align_conditions_to_states(old_X, old_states, new_X, new_conditions, n_components=0.95, plot=True,
-#                                      save_dir="figs", save_prefix="myalign") 
-# results["distance_matrix"]  # condition x state (mean Euclidean distance)
-# results["softscore_matrix"] # condition x state (mean softmax(-0.5 * dist^2))
-#
-# Where:
-# - old_X, new_X are DataFrames (rows=cells, columns=shared morphological features)
-# - old_states is a Series of gold-state labels (length == len(old_X))
-# - new_conditions is a Series of condition labels (length == len(new_X))
+# results = align_conditions_to_states(
+#     old_X, old_states, new_X, new_conditions,
+#     n_components=0.95, weighted=True, plot=True,
+#     save_dir="figs", save_prefix="myalign"
+# )
+# results["distance_matrix"]  # condition x state (mean distance; lower = closer)
 
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Union
@@ -36,6 +34,8 @@ class AlignmentModel:
     centroids_: Dict[str, np.ndarray]
     states_: Tuple[str, ...]
     n_components_: Union[int, float]
+    weighted_: bool
+    pc_weights_: Optional[np.ndarray]  # None if weighted_ is False
 
 
 def _intersect_and_align(
@@ -59,7 +59,7 @@ def _winsorize_to_old_bounds(
         raise ValueError("clip_quantiles must be a tuple within [0,1] with ql < qh.")
     # Compute bounds from OLD only to prevent data leakage
     low = old_X.quantile(ql, axis=0, numeric_only=True)
-    high = old_X.quantile( (qh), axis=0, numeric_only=True)
+    high = old_X.quantile(qh, axis=0, numeric_only=True)
     old_Xc = old_X.clip(lower=low, upper=high, axis=1)
     new_Xc = new_X.clip(lower=low, upper=high, axis=1)
     return old_Xc, new_Xc
@@ -94,34 +94,49 @@ def _compute_centroids(Xp_old: np.ndarray, states: pd.Series) -> Dict[str, np.nd
 
 
 def _pairwise_distances_to_centroids(
-    Xp: np.ndarray, centroids: Dict[str, np.ndarray]
+    Xp: np.ndarray,
+    centroids: Dict[str, np.ndarray],
+    weighted: bool = False,
+    pc_weights: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    # Returns matrix shape (n_samples, n_states) of Euclidean distances
+    """
+    Compute distances from samples (Xp) to each centroid.
+
+    If weighted=True, computes a weighted Euclidean distance:
+        d(x,c) = sqrt( sum_j w_j * (x_j - c_j)^2 )
+
+    In MoCA, w_j defaults to PCA explained_variance_ratio_ (from OLD PCA fit).
+    """
     state_names = list(centroids.keys())
-    C = np.vstack([centroids[s] for s in state_names])  # (n_states, p)
-    # Efficient squared Euclidean: ||x-c||^2 = ||x||^2 + ||c||^2 - 2 x·c
-    x2 = np.sum(Xp**2, axis=1, keepdims=True)           # (n,1)
-    c2 = np.sum(C**2, axis=1, keepdims=True).T          # (1,k)
-    xc = Xp @ C.T                                       # (n,k)
-    dist2 = np.maximum(x2 + c2 - 2.0 * xc, 0.0)
-    d = np.sqrt(dist2, out=dist2)  # reuse buffer
-    return d  # (n, k)
+    C = np.vstack([centroids[s] for s in state_names])  # (k, p)
 
-
-def _softmax_from_distances(d: np.ndarray) -> np.ndarray:
-    # Convert Euclidean distances to soft scores via softmax(-0.5 * d^2)
-    # Use a numerically stable trick by subtracting row-wise max of the exponent argument
-    z = -0.5 * (d ** 2)
-    z_max = np.max(z, axis=1, keepdims=True)
-    e = np.exp(z - z_max)
-    p = e / np.sum(e, axis=1, keepdims=True)
-    return p
+    if weighted:
+        if pc_weights is None:
+            raise ValueError("pc_weights must be provided when weighted=True.")
+        w = np.asarray(pc_weights, dtype=float).reshape(1, -1)  # (1, p)
+        if w.shape[1] != Xp.shape[1]:
+            raise ValueError("pc_weights length must match the number of PCA components.")
+        # Weighted squared Euclidean using scaled coordinates: x' = sqrt(w) * x
+        sw = np.sqrt(w)  # (1, p)
+        Xw = Xp * sw
+        Cw = C * sw
+        x2 = np.sum(Xw**2, axis=1, keepdims=True)          # (n,1)
+        c2 = np.sum(Cw**2, axis=1, keepdims=True).T        # (1,k)
+        xc = Xw @ Cw.T                                     # (n,k)
+        dist2 = np.maximum(x2 + c2 - 2.0 * xc, 0.0)
+        return np.sqrt(dist2)
+    else:
+        # Standard Euclidean in PCA space
+        x2 = np.sum(Xp**2, axis=1, keepdims=True)          # (n,1)
+        c2 = np.sum(C**2, axis=1, keepdims=True).T         # (1,k)
+        xc = Xp @ C.T                                      # (n,k)
+        dist2 = np.maximum(x2 + c2 - 2.0 * xc, 0.0)
+        return np.sqrt(dist2)
 
 
 def _aggregate_by_condition(
     values: np.ndarray, conditions: pd.Series, col_names: Tuple[str, ...], agg: str = "mean"
 ) -> pd.DataFrame:
-    # values shape (n_samples, k); group by conditions and aggregate columns independently
     df_vals = pd.DataFrame(values, columns=col_names)
     df_vals["_cond_"] = conditions.values
     if agg == "mean":
@@ -146,7 +161,6 @@ def _plot_heatmap(matrix: pd.DataFrame, title: str, save_path: Optional[str] = N
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     if save_path is not None:
-        # Save as TIFF at specified DPI
         fig.savefig(save_path, dpi=dpi, format="tiff", bbox_inches="tight")
     plt.show()
 
@@ -157,6 +171,7 @@ def align_conditions_to_states(
     new_X: pd.DataFrame,
     new_conditions: pd.Series,
     n_components: Union[int, float] = 0.95,
+    weighted: bool = True,
     clip_quantiles: Optional[Tuple[float, float]] = (0.005, 0.995),
     aggregate: str = "mean",
     random_state: int = 0,
@@ -168,42 +183,14 @@ def align_conditions_to_states(
     """
     Align NEW conditions to OLD gold states using Euclidean distance in PCA space.
 
-    Parameters
-    ----------
-    old_X : DataFrame
-        OLD dataset features (rows=cells, cols=features) with gold states.
-    old_states : Series
-        Gold state labels for OLD rows.
-    new_X : DataFrame
-        NEW dataset features (rows=cells, cols=features).
-    new_conditions : Series
-        Condition labels for NEW rows.
-    n_components : int or float, default 0.95
-        PCA dimensionality. If float in (0,1], keeps this proportion of variance.
-        If int >= 1, keeps that many components.
-    clip_quantiles : tuple(float, float) or None, default (0.005, 0.995)
-        If provided, winsorize both OLD and NEW to OLD-derived per-feature bounds at
-        the given quantiles to reduce outlier impact. Set to None to disable.
-    aggregate : {'mean','median'}, default 'mean'
-        Aggregation for condition-level summaries.
-    random_state : int, default 0
-        Random state for PCA.
-    plot : bool, default True
-        If True, show heatmaps.
-    save_dir : str or None, default None
-        Directory to save 300 dpi .tiff plots. If None, no files are written.
-    save_prefix : str or None, default None
-        File name prefix to use when saving plots. Requires save_dir to be set.
-        Files will be named: f"{save_prefix}_distance.tiff" and f"{save_prefix}_softscore.tiff"
-    dpi : int, default 300
-        Resolution (dots per inch) for saved TIFFs.
+    If weighted=True, distances are weighted by PCA component importance
+    (explained_variance_ratio_ from the OLD PCA fit).
 
     Returns
     -------
     dict with:
-        - 'model'             : AlignmentModel with scaler, pca, centroids, etc.
-        - 'distance_matrix'   : DataFrame [conditions x states] of mean Euclidean distances.
-        - 'softscore_matrix'  : DataFrame [conditions x states] of mean soft scores.
+        - 'model'           : AlignmentModel with scaler, pca, centroids, etc.
+        - 'distance_matrix' : DataFrame [conditions x states] of mean distances.
     """
     # 1) Column intersection & alignment
     old_Xa, new_Xa, shared = _intersect_and_align(old_X, new_X)
@@ -223,17 +210,14 @@ def align_conditions_to_states(
         raise ValueError("No centroids could be computed from the provided old_states.")
 
     # 5) Distances from each NEW cell to each centroid
-    D_new = _pairwise_distances_to_centroids(Xp_new, centroids)  # (n_new, k)
+    pc_w = pca.explained_variance_ratio_.copy() if weighted else None
+    D_new = _pairwise_distances_to_centroids(Xp_new, centroids, weighted=weighted, pc_weights=pc_w)
 
-    # 6) Soft scores via softmax(-0.5 * d^2)
-    P_new = _softmax_from_distances(D_new)  # (n_new, k)
-
-    # 7) Aggregate to condition x state matrices
+    # 6) Aggregate to condition x state distance matrix
     new_conds = pd.Series(new_conditions).astype(str).reset_index(drop=True)
     dist_mat = _aggregate_by_condition(D_new, new_conds, state_names, agg=aggregate)
-    soft_mat = _aggregate_by_condition(P_new, new_conds, state_names, agg=aggregate)
 
-    # 8) Package model
+    # 7) Package model
     model = AlignmentModel(
         feature_names=tuple(shared),
         scaler=scaler,
@@ -241,21 +225,21 @@ def align_conditions_to_states(
         centroids_=centroids,
         states_=state_names,
         n_components_=n_components,
+        weighted_=weighted,
+        pc_weights_=pc_w,
     )
 
-    # 9) Plot (and optionally save)
-    dist_path = soft_path = None
+    # 8) Plot (and optionally save)
+    dist_path = None
     if save_dir is not None and save_prefix is not None:
         os.makedirs(save_dir, exist_ok=True)
         dist_path = os.path.join(save_dir, f"{save_prefix}_distance.tiff")
-        soft_path = os.path.join(save_dir, f"{save_prefix}_softscore.tiff")
 
     if plot:
-        _plot_heatmap(dist_mat, "Mean Euclidean distance: Condition × Gold State", save_path=dist_path, dpi=dpi)
-        _plot_heatmap(soft_mat, "Mean Soft Score (softmax(-0.5·d²)): Condition × Gold State", save_path=soft_path, dpi=dpi)
+        title = "Mean weighted Euclidean distance: Condition × Gold State" if weighted else "Mean Euclidean distance: Condition × Gold State"
+        _plot_heatmap(dist_mat, title, save_path=dist_path, dpi=dpi)
 
     return {
         "model": model,
         "distance_matrix": dist_mat,
-        "softscore_matrix": soft_mat,
     }
