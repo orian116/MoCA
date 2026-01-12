@@ -22,13 +22,14 @@ pip install git+https://github.com/orian116/MoCA.git
 ```python
 from moca import plot_old_new_hist_overlays
 plot_old_new_hist_overlays(old_X, new_X, bins=60)
-
+```
 - Detects batch shifts
 - Identifies outlier features
 - Prevents misleading distance metrics
 
 ## 2. Align conditions to gold states
 
+```python
 from moca import align_conditions_to_states
 res = align_conditions_to_states(
     old_X=old_X,
@@ -43,7 +44,7 @@ res = align_conditions_to_states(
 )
 
 distance_matrix = res["distance_matrix"]
-
+```
 - Fits StandardScaler + PCA on OLD data only
 - Computes gold-state centroids in PCA space
 - Measures (weighted) Euclidean distance from NEW cells to centroids
@@ -55,7 +56,7 @@ distance_matrix = res["distance_matrix"]
 - weighted=False treats all PCs equally
 
 ## 3. Visualize Embedding Space
-
+```python
 from moca import plot_umap_alignment
 
 plot_umap_alignment(
@@ -65,9 +66,10 @@ plot_umap_alignment(
     save_dir="figs",
     save_prefix="moca_umap"
 )
+```
 
 ## 4. Generate shared feature heatmaps
-
+```python
 from moca import generate_shared_heatmap
 
 generate_shared_heatmap(
@@ -79,6 +81,7 @@ generate_shared_heatmap(
     save_dir="figs",
     save_prefix="moca_shared_features"
 )
+```
 
 - Compare feature programs across conditions
 - Identify morphology drivers of alignment
