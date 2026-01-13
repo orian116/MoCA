@@ -16,7 +16,7 @@ dependencies = [
   "pandas",
   "matplotlib",
   "scikit-learn",
-  "umap-learn",
+  "umap",
 ]
 
 [tool.setuptools]
