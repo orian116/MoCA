@@ -68,7 +68,7 @@ def create_combined_space(
     new_metadata: Optional[pd.DataFrame] = None,
     batch_correction: bool = False,
     log: bool = False,
-    pcs_by_variance: bool = False 
+    pcs_by_variance: bool = False,
     umap_n_neighbors: int = 30,
     umap_min_dist: float = 0.3,
     umap_metric: str = "euclidean",
