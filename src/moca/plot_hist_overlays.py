@@ -3,6 +3,67 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+
+def clip_new_overlays(
+    old_X: pd.DataFrame,
+    new_X: pd.DataFrame,
+    features=None,
+) -> pd.DataFrame:
+    """
+    Remove rows from new_X where any feature falls outside the range of old_X.
+
+    Parameters
+    ----------
+    old_X : DataFrame
+        Old dataset whose per-feature [min, max] defines the valid range.
+    new_X : DataFrame
+        New dataset to be filtered.
+    features : list-like or None
+        Subset of feature names to use for range-checking.
+        If None, uses the intersection of columns between old_X and new_X.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of new_X with any rows outside old_X's per-feature range removed.
+    """
+    if features is None:
+        shared = [c for c in old_X.columns if c in new_X.columns]
+    else:
+        shared = [c for c in features if c in old_X.columns and c in new_X.columns]
+
+    if len(shared) == 0:
+        raise ValueError("No shared features found between old_X and new_X.")
+
+    mask = pd.Series(True, index=new_X.index)
+
+    for feat in shared:
+        x_old = pd.to_numeric(old_X[feat], errors="coerce").dropna()
+        x_new = pd.to_numeric(new_X[feat], errors="coerce")
+
+        if x_old.empty:
+            continue
+
+        old_min = x_old.min()
+        old_max = x_old.max()
+
+        # Rows where the value is within [old_min, old_max]; NaNs become False
+        in_range = (x_new >= old_min) & (x_new <= old_max)
+        mask = mask & in_range.reindex(new_X.index, fill_value=False)
+
+    filtered = new_X[mask].copy()
+    n_removed = len(new_X) - len(filtered)
+    if n_removed > 0:
+        print(
+            f"clip_new_overlays: removed {n_removed} of {len(new_X)} rows "
+            f"({n_removed / len(new_X) * 100:.1f}%) that fell outside old_X range."
+        )
+    else:
+        print("clip_new_overlays: no rows removed; new_X is fully within old_X range.")
+
+    return filtered
+
+
 def plot_old_new_hist_overlays(old_X: pd.DataFrame,
                                new_X: pd.DataFrame,
                                bins: int = 50,
