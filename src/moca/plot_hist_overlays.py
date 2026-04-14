@@ -8,6 +8,7 @@ def clip_new_overlays(
     old_X: pd.DataFrame,
     new_X: pd.DataFrame,
     features=None,
+    quantiles=None,
 ) -> pd.DataFrame:
     """
     Remove rows from new_X where any feature falls outside the range of old_X.
@@ -15,17 +16,22 @@ def clip_new_overlays(
     Parameters
     ----------
     old_X : DataFrame
-        Old dataset whose per-feature [min, max] defines the valid range.
+        Old dataset whose per-feature bounds define the valid range.
     new_X : DataFrame
         New dataset to be filtered.
     features : list-like or None
         Subset of feature names to use for range-checking.
         If None, uses the intersection of columns between old_X and new_X.
+    quantiles : tuple(float, float) or None
+        If provided, use old_X quantile bounds instead of absolute min/max.
+        E.g. ``quantiles=(0.01, 0.99)`` keeps new_X rows whose values fall
+        within old_X's 1st–99th percentile range for each feature.
+        Values must be in (0, 1).  If None, absolute min/max is used.
 
     Returns
     -------
     pd.DataFrame
-        Copy of new_X with any rows outside old_X's per-feature range removed.
+        Copy of new_X with any rows outside the per-feature bounds removed.
     """
     if features is None:
         shared = [c for c in old_X.columns if c in new_X.columns]
@@ -34,6 +40,14 @@ def clip_new_overlays(
 
     if len(shared) == 0:
         raise ValueError("No shared features found between old_X and new_X.")
+
+    if quantiles is not None:
+        lo, hi = quantiles
+        if not (0 < lo < hi < 1):
+            raise ValueError("quantiles must be a (low, high) tuple with 0 < low < high < 1.")
+        bound_label = f"old_X {lo*100:g}th–{hi*100:g}th percentile"
+    else:
+        bound_label = "old_X min–max"
 
     mask = pd.Series(True, index=new_X.index)
 
@@ -44,10 +58,13 @@ def clip_new_overlays(
         if x_old.empty:
             continue
 
-        old_min = x_old.min()
-        old_max = x_old.max()
+        if quantiles is not None:
+            old_min = x_old.quantile(lo)
+            old_max = x_old.quantile(hi)
+        else:
+            old_min = x_old.min()
+            old_max = x_old.max()
 
-        # Rows where the value is within [old_min, old_max]; NaNs become False
         in_range = (x_new >= old_min) & (x_new <= old_max)
         mask = mask & in_range.reindex(new_X.index, fill_value=False)
 
@@ -56,10 +73,10 @@ def clip_new_overlays(
     if n_removed > 0:
         print(
             f"clip_new_overlays: removed {n_removed} of {len(new_X)} rows "
-            f"({n_removed / len(new_X) * 100:.1f}%) that fell outside old_X range."
+            f"({n_removed / len(new_X) * 100:.1f}%) outside {bound_label}."
         )
     else:
-        print("clip_new_overlays: no rows removed; new_X is fully within old_X range.")
+        print(f"clip_new_overlays: no rows removed; new_X is fully within {bound_label}.")
 
     return filtered
 
