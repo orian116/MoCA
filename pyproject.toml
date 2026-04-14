@@ -16,8 +16,12 @@ dependencies = [
   "pandas",
   "matplotlib",
   "scikit-learn",
+  "scipy",
   "umap-learn",
 ]
+
+[project.optional-dependencies]
+batch = ["combat"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
