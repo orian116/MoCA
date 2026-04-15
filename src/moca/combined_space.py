@@ -67,6 +67,7 @@ def create_combined_space(
     old_metadata: Optional[pd.DataFrame] = None,
     new_metadata: Optional[pd.DataFrame] = None,
     batch_correction: bool = False,
+    batch_key: str = "batch",
     log: bool = False,
     pcs_by_variance: bool = False,
     variance: float = 0.95,
@@ -94,11 +95,21 @@ def create_combined_space(
     new_metadata : DataFrame or None
         Extra per-cell metadata for new_X (same row order as new_X).
     batch_correction : bool, default False
-        If True, apply ComBat (pycombat) batch correction on the scaled data
-        before PCA.  Requires the ``combat`` package
-        (``pip install combat``).
+        If True, apply ComBat (pycombat) batch correction before PCA.
+        The morphological values are log1p-transformed, passed to pycombat,
+        and the corrected matrix is fed directly into PCA (no StandardScaler).
+        Requires the ``combat`` package (``pip install combat``).
+    batch_key : str, default "batch"
+        Column in the combined DataFrame to use as batch labels for pycombat.
+        Defaults to the ``batch`` column created automatically from
+        ``old_id`` / ``new_id``.  Any other column present in the combined
+        DataFrame at correction time can be used (e.g. a plate or run ID
+        added via ``old_metadata`` / ``new_metadata``).
+        Only used when ``batch_correction=True``.
     log : bool, default False
         If True, apply log1p to the morphological features before scaling.
+        Only used when ``batch_correction=False`` (when batch correction is
+        enabled, log1p is applied internally as part of the pycombat workflow).
     pcs_by_variance : bool, default False
         If True, the number of PCA components is chosen automatically to
         explain ``variance`` of the total variance.  All retained components
@@ -152,20 +163,13 @@ def create_combined_space(
     df_combined.index = df_combined["cell_id"].values
 
     # ------------------------------------------------------------------
-    # Step 3: Extract morphological values; optionally log-transform
-    # ------------------------------------------------------------------
-    morph_values = df_combined[common_morph_features].values.astype(float)
-    if log:
-        morph_values = np.log1p(morph_values)
-
-    # ------------------------------------------------------------------
-    # Step 4: Scale
-    # ------------------------------------------------------------------
-    scaler = StandardScaler()
-    scaled_data = scaler.fit_transform(morph_values)
-
-    # ------------------------------------------------------------------
-    # Step 5: Optional ComBat batch correction
+    # Step 3: Prepare data for PCA
+    #
+    # Batch-correction path:
+    #   log1p(raw) -> pycombat -> data_corrected (fed to PCA)
+    #
+    # Standard path:
+    #   optional log1p -> StandardScaler -> data_corrected (fed to PCA)
     # ------------------------------------------------------------------
     if batch_correction:
         try:
@@ -176,15 +180,28 @@ def create_combined_space(
                 "Install with: pip install combat"
             ) from exc
 
+        if batch_key not in df_combined.columns:
+            raise ValueError(
+                f"batch_key '{batch_key}' not found in the combined DataFrame. "
+                f"Available columns: {list(df_combined.columns)}"
+            )
+
         # ComBat expects rows = features, columns = samples
-        data_matrix = pd.DataFrame(scaled_data.T, index=common_morph_features)
-        batch_labels = df_combined["batch"].values
+        data_matrix = pd.DataFrame(
+            np.log1p(df_combined[common_morph_features]).T,
+            index=common_morph_features,
+        )
+        batch_labels = df_combined[batch_key].values
 
         data_corrected = pycombat(data_matrix, batch_labels)
         # Transpose back: rows = samples, columns = features
         data_corrected = data_corrected.T
     else:
-        data_corrected = scaled_data
+        morph_values = df_combined[common_morph_features].values.astype(float)
+        if log:
+            morph_values = np.log1p(morph_values)
+        scaler = StandardScaler()
+        data_corrected = scaler.fit_transform(morph_values)
 
     # ------------------------------------------------------------------
     # Step 6: PCA
