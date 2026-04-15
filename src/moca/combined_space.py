@@ -68,6 +68,8 @@ def create_combined_space(
     new_metadata: Optional[pd.DataFrame] = None,
     batch_correction: bool = False,
     log: bool = False,
+    pcs_by_variance: bool = False,
+    variance: float = 0.95,
     umap_n_neighbors: int = 30,
     umap_min_dist: float = 0.3,
     umap_metric: str = "euclidean",
@@ -97,6 +99,14 @@ def create_combined_space(
         (``pip install combat``).
     log : bool, default False
         If True, apply log1p to the morphological features before scaling.
+    pcs_by_variance : bool, default False
+        If True, the number of PCA components is chosen automatically to
+        explain ``variance`` of the total variance.  All retained components
+        are passed to UMAP; only PC1 and PC2 are stored in the output.
+        If False, exactly 2 components are used.
+    variance : float, default 0.95
+        Fraction of variance to retain when ``pcs_by_variance=True``.
+        Ignored when ``pcs_by_variance=False``.
     umap_n_neighbors : int, default 30
     umap_min_dist : float, default 0.3
     umap_metric : str, default "euclidean"
@@ -177,9 +187,10 @@ def create_combined_space(
         data_corrected = scaled_data
 
     # ------------------------------------------------------------------
-    # Step 6: PCA (2 components)
+    # Step 6: PCA
     # ------------------------------------------------------------------
-    pca_corrected = PCA(n_components=2).fit_transform(data_corrected)
+    n_components = variance if pcs_by_variance else 2
+    pca_corrected = PCA(n_components=n_components).fit_transform(data_corrected)
 
     # ------------------------------------------------------------------
     # Step 7: Add PC1, PC2 to metadata
