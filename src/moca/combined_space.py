@@ -163,6 +163,35 @@ def create_combined_space(
     df_combined.index = df_combined["cell_id"].values
 
     # ------------------------------------------------------------------
+    # Step 2b: Merge additional metadata now so all columns are available
+    # for batch_key lookup and are present in the final results_df
+    # ------------------------------------------------------------------
+    if old_metadata is not None or new_metadata is not None:
+        if old_metadata is None:
+            old_metadata = pd.DataFrame(index=range(n_old))
+        if new_metadata is None:
+            new_metadata = pd.DataFrame(index=range(n_new))
+
+        old_meta_reset = old_metadata.reset_index(drop=True)
+        new_meta_reset = new_metadata.reset_index(drop=True)
+
+        if len(old_meta_reset) != n_old:
+            raise ValueError(
+                f"old_metadata has {len(old_meta_reset)} rows but old_X has {n_old} rows."
+            )
+        if len(new_meta_reset) != n_new:
+            raise ValueError(
+                f"new_metadata has {len(new_meta_reset)} rows but new_X has {n_new} rows."
+            )
+
+        merged_meta = _merge_metadata_dfs(old_meta_reset, new_meta_reset, old_id, new_id)
+        merged_meta.index = df_combined.index
+
+        extra_cols = [c for c in merged_meta.columns if c not in df_combined.columns]
+        if extra_cols:
+            df_combined = pd.concat([df_combined, merged_meta[extra_cols]], axis=1)
+
+    # ------------------------------------------------------------------
     # Step 3: Prepare data for PCA
     #
     # Batch-correction path:
@@ -231,35 +260,5 @@ def create_combined_space(
     # ------------------------------------------------------------------
     df_combined["UMAP1"] = umap_coords[:, 0]
     df_combined["UMAP2"] = umap_coords[:, 1]
-
-    # ------------------------------------------------------------------
-    # Step 10: Merge additional metadata (if provided)
-    # ------------------------------------------------------------------
-    if old_metadata is not None or new_metadata is not None:
-        # Allow one side to be absent — treat it as an empty DataFrame
-        if old_metadata is None:
-            old_metadata = pd.DataFrame(index=range(n_old))
-        if new_metadata is None:
-            new_metadata = pd.DataFrame(index=range(n_new))
-
-        old_meta_reset = old_metadata.reset_index(drop=True)
-        new_meta_reset = new_metadata.reset_index(drop=True)
-
-        if len(old_meta_reset) != n_old:
-            raise ValueError(
-                f"old_metadata has {len(old_meta_reset)} rows but old_X has {n_old} rows."
-            )
-        if len(new_meta_reset) != n_new:
-            raise ValueError(
-                f"new_metadata has {len(new_meta_reset)} rows but new_X has {n_new} rows."
-            )
-
-        merged_meta = _merge_metadata_dfs(old_meta_reset, new_meta_reset, old_id, new_id)
-        merged_meta.index = df_combined.index
-
-        # cbind: add only columns not already present in df_combined
-        extra_cols = [c for c in merged_meta.columns if c not in df_combined.columns]
-        if extra_cols:
-            df_combined = pd.concat([df_combined, merged_meta[extra_cols]], axis=1)
 
     return df_combined
