@@ -100,6 +100,8 @@ def fit_old_embedding(
     random_state: int = 0,
     save_dir: str = ".",
     save_prefix: str = "moca_old",
+    init_coords: Optional[List] = None,
+    umap_n_epochs: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Fit PCA + UMAP on ``old_X``, save both models as ``.pkl`` files, and
@@ -127,6 +129,20 @@ def fit_old_embedding(
     save_prefix : str, default "moca_old"
         Filename stem.  Produces ``{save_prefix}_pca.pkl`` and
         ``{save_prefix}_umap.pkl``.
+    init_coords : list of two array-likes or None, default None
+        ``[umap1_array, umap2_array]`` — published / pre-existing UMAP
+        coordinates for the old cells (shape ``(n_old,)`` each).
+        When provided, UMAP is initialised at these positions so the
+        resulting layout closely matches the published figure.  New cells
+        can then be projected into this anchored space via
+        ``reducer.transform()``.  Pass ``umap_n_epochs`` to control how
+        much the optimizer is allowed to move old cells away from the
+        initial positions (lower = closer to published layout).
+    umap_n_epochs : int or None, default None
+        Number of UMAP optimisation epochs.  ``None`` uses the UMAP
+        default (~200 for small datasets, ~500 for large ones).  When
+        ``init_coords`` is set, a smaller value (e.g. 50–100) keeps old
+        cells closer to their published positions.
 
     Returns
     -------
@@ -145,6 +161,19 @@ def fit_old_embedding(
     pca = PCA(n_components=n_components_pca, random_state=random_state)
     Xp_old = pca.fit_transform(old_arr)
 
+    # Resolve UMAP init
+    if init_coords is not None:
+        umap_init = np.column_stack(
+            [np.asarray(init_coords[0], dtype=float),
+             np.asarray(init_coords[1], dtype=float)]
+        )
+        if umap_init.shape[0] != n_old:
+            raise ValueError(
+                f"init_coords has {umap_init.shape[0]} rows but old_X has {n_old}."
+            )
+    else:
+        umap_init = "spectral"
+
     # Fit UMAP
     reducer = umap_module.UMAP(
         n_neighbors=umap_n_neighbors,
@@ -152,6 +181,8 @@ def fit_old_embedding(
         metric=umap_metric,
         random_state=random_state,
         transform_seed=random_state,
+        init=umap_init,
+        n_epochs=umap_n_epochs,
     ).fit(Xp_old)
     U_old = reducer.transform(Xp_old)
 
