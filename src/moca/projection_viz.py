@@ -1,7 +1,9 @@
 
+import os
+import pickle
 import numpy as np
 import pandas as pd
-import matplotlib
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -41,8 +43,8 @@ def _plot_kde_on_ax(
     thresh: float = 0.05,
     n_contours: int = 5,
     linewidth: float = 1.5,
-    show_legend: bool = True,
 ):
+    """Plot KDE on an existing axes; always suppresses seaborn's own legend."""
     groups = hue_order if hue_order is not None else list(df[color_by].dropna().unique())
     palette = (
         colors if colors is not None
@@ -65,17 +67,128 @@ def _plot_kde_on_ax(
         ax=ax,
     )
 
+    # Always remove seaborn's legend — caller builds the combined legend
     legend = ax.get_legend()
     if legend:
-        if show_legend:
-            legend.set_title(color_by, prop={"weight": "bold", "size": 9})
-            legend.get_frame().set_linewidth(0)
-        else:
-            legend.remove()
+        legend.remove()
+
+
+def _build_legend(ax, old_id: str, groups: List, colors: List, show: bool):
+    """Attach a combined legend: grey patch for old_id + colour patches for groups."""
+    if not show:
+        return
+    handles = [mpatches.Patch(color="grey", alpha=0.5, label=old_id)]
+    handles += [
+        mpatches.Patch(color=colors[i % len(colors)], label=str(g))
+        for i, g in enumerate(groups)
+    ]
+    ax.legend(handles=handles, fontsize=8, frameon=False, markerscale=1)
 
 
 # ---------------------------------------------------------------------------
-# Public function
+# fit_old_embedding — fit PCA + UMAP on old data, save .pkl files
+# ---------------------------------------------------------------------------
+
+def fit_old_embedding(
+    old_X: pd.DataFrame,
+    old_id: str,
+    old_metadata: Optional[pd.DataFrame] = None,
+    n_components_pca: Union[int, float] = 0.95,
+    umap_n_neighbors: int = 30,
+    umap_min_dist: float = 0.3,
+    umap_metric: str = "euclidean",
+    random_state: int = 0,
+    save_dir: str = ".",
+    save_prefix: str = "moca_old",
+) -> pd.DataFrame:
+    """
+    Fit PCA + UMAP on ``old_X``, save both models as ``.pkl`` files, and
+    return a metadata DataFrame with ``UMAP1_old`` / ``UMAP2_old`` columns.
+
+    The saved files are used by :func:`plot_and_save_projections` (via
+    ``pca_path`` / ``umap_path``) to ensure that multiple new datasets are
+    projected into exactly the same embedding space.
+
+    Parameters
+    ----------
+    old_X : DataFrame
+        Pre-scaled / batch-corrected feature matrix (right before PCA).
+    old_id : str
+        Label for the old dataset (stored in the ``batch`` column).
+    old_metadata : DataFrame or None
+        Per-cell metadata (same row order as old_X).
+    n_components_pca : int or float, default 0.95
+    umap_n_neighbors : int, default 30
+    umap_min_dist : float, default 0.3
+    umap_metric : str, default "euclidean"
+    random_state : int, default 0
+    save_dir : str, default "."
+        Directory where ``.pkl`` files are written.
+    save_prefix : str, default "moca_old"
+        Filename stem.  Produces ``{save_prefix}_pca.pkl`` and
+        ``{save_prefix}_umap.pkl``.
+
+    Returns
+    -------
+    pd.DataFrame
+        ``old_metadata`` columns  + ``batch`` + ``UMAP1_old`` + ``UMAP2_old``.
+        Pass this directly as ``old_metadata`` in
+        :func:`plot_and_save_projections`.
+    """
+    if umap_module is None:
+        raise ImportError("umap-learn is required. Install with: pip install umap-learn")
+
+    n_old = len(old_X)
+    old_arr = old_X.values.astype(float)
+
+    # Fit PCA
+    pca = PCA(n_components=n_components_pca, random_state=random_state)
+    Xp_old = pca.fit_transform(old_arr)
+
+    # Fit UMAP
+    reducer = umap_module.UMAP(
+        n_neighbors=umap_n_neighbors,
+        min_dist=umap_min_dist,
+        metric=umap_metric,
+        random_state=random_state,
+        transform_seed=random_state,
+    ).fit(Xp_old)
+    U_old = reducer.transform(Xp_old)
+
+    # Save models
+    os.makedirs(save_dir, exist_ok=True)
+    pca_path = os.path.join(save_dir, f"{save_prefix}_pca.pkl")
+    umap_path = os.path.join(save_dir, f"{save_prefix}_umap.pkl")
+
+    with open(pca_path, "wb") as f:
+        pickle.dump({"pca": pca, "feature_names": list(old_X.columns)}, f)
+    with open(umap_path, "wb") as f:
+        pickle.dump(reducer, f)
+
+    print(f"Saved PCA  → {pca_path}")
+    print(f"Saved UMAP → {umap_path}")
+
+    # Build result DataFrame
+    old_meta = (
+        old_metadata.reset_index(drop=True).copy()
+        if old_metadata is not None
+        else pd.DataFrame(index=range(n_old))
+    )
+    if len(old_meta) != n_old:
+        raise ValueError(
+            f"old_metadata has {len(old_meta)} rows but old_X has {n_old}."
+        )
+
+    old_meta = old_meta.copy()
+    old_meta["batch"] = old_id
+    old_meta["UMAP1_old"] = U_old[:, 0]
+    old_meta["UMAP2_old"] = U_old[:, 1]
+
+    return old_meta
+
+
+# ---------------------------------------------------------------------------
+# plot_and_save_projections
 # ---------------------------------------------------------------------------
 
 def plot_and_save_projections(
@@ -87,6 +200,8 @@ def plot_and_save_projections(
     new_metadata: pd.DataFrame,
     old_metadata: Optional[pd.DataFrame] = None,
     old_column_for_knn: Optional[str] = None,
+    pca_path: Optional[str] = None,
+    umap_path: Optional[str] = None,
     override_old_coordinates: bool = False,
     old_coordinates: Optional[List] = None,
     kde: bool = False,
@@ -119,56 +234,65 @@ def plot_and_save_projections(
     metadata column.  Optionally transfer an old metadata label to new cells
     via KNN.
 
+    Preferred usage
+    ---------------
+    Run :func:`fit_old_embedding` once on the reference data to fit the PCA
+    and UMAP and save them as ``.pkl`` files.  Pass the returned DataFrame as
+    ``old_metadata`` and the paths as ``pca_path`` / ``umap_path`` to
+    guarantee every call uses exactly the same embedding space.
+
     Two independent goals
     ---------------------
-    1. **Visualisation** — new cells are shown in the old UMAP space, coloured
-       by ``new_column_to_project`` (a column from ``new_metadata``).
-       Old cells form a grey background.
-
-    2. **KNN label transfer** — if ``old_column_for_knn`` is provided, a KNN
-       classifier is fitted on old cells (using their UMAP1_old / UMAP2_old
-       coordinates and ``old_column_for_knn`` labels), then predicts that label
-       for every new cell.  The result is stored as
-       ``{old_column_for_knn}_kNN`` in the returned DataFrame.
+    1. **Visualisation** — new cells shown in the old UMAP space, coloured by
+       ``new_column_to_project`` (from ``new_metadata``).  Old cells form a
+       grey background.  The legend always includes ``old_id`` (grey) and the
+       group labels for ``new_column_to_project``.
+    2. **KNN label transfer** — if ``old_column_for_knn`` is given, a KNN
+       classifier is fitted on old cells (UMAP1_old / UMAP2_old +
+       ``old_column_for_knn``), then predicts that label for every new cell.
+       Result stored as ``{old_column_for_knn}_kNN`` for new cells.
 
     Parameters
     ----------
     old_X : DataFrame
-        Pre-scaled / batch-corrected feature matrix for the reference dataset
-        (right before PCA — no StandardScaler is applied internally).
+        Pre-scaled / batch-corrected feature matrix for the reference dataset.
     new_X : DataFrame
         Same for the query dataset.
     old_id : str
-        Display label for old cells (grey in the plot, value in ``batch`` column).
+        Label for old cells (grey in plot, value in ``batch`` column).
     new_id : str
-        Display label for new cells.
+        Label for new cells.
     new_column_to_project : str
-        Column from ``new_metadata`` used to colour new cells in the plot.
+        Column from ``new_metadata`` used to colour new cells.
     new_metadata : DataFrame
         Per-cell metadata for new_X (same row order).
     old_metadata : DataFrame or None
-        Per-cell metadata for old_X (same row order).
+        Per-cell metadata for old_X (same row order).  If this DataFrame
+        contains ``UMAP1_old`` / ``UMAP2_old`` (e.g. from
+        :func:`fit_old_embedding`), those coordinates are used directly for
+        display and KNN — no re-transformation of old_X is needed.
     old_column_for_knn : str or None
-        Column from ``old_metadata`` used to fit the KNN classifier.
-        Old cells are the reference; new cells are the query.
-        The predicted column ``{old_column_for_knn}_kNN`` is added to the
-        returned DataFrame for new cells.  Skipped when None.
+        Column from ``old_metadata`` to fit KNN with.  Predicts
+        ``{old_column_for_knn}_kNN`` for new cells.
+    pca_path : str or None
+        Path to a ``.pkl`` saved by :func:`fit_old_embedding``.
+        When provided together with ``umap_path``, the pre-fitted models are
+        loaded instead of fitting new ones.
+    umap_path : str or None
+        Path to the UMAP ``.pkl`` saved by :func:`fit_old_embedding`.
     override_old_coordinates : bool, default False
-        If True, use ``old_coordinates`` to display old cells instead of the
-        internally computed UMAP positions.  PCA and UMAP are still fitted on
-        old_X to project new cells; the override is for visualisation and
-        backwards-compatibility only.
+        Legacy parameter — if True, use ``old_coordinates`` for display.
+        Superseded by passing ``old_metadata`` with ``UMAP1_old`` /
+        ``UMAP2_old`` columns.
     old_coordinates : list of two array-likes or None
-        ``[umap1_array, umap2_array]`` of length ``n_old`` used when
-        ``override_old_coordinates=True``.  Stored as ``UMAP1_preRun`` /
-        ``UMAP2_preRun`` in the returned DataFrame.
+        ``[umap1, umap2]`` for old cells; used when
+        ``override_old_coordinates=True``.
     kde : bool, default False
-        If True, show KDE density contours for new cells instead of points.
+        Show KDE density contours for new cells instead of scatter points.
     n_components_pca : int or float, default 0.95
-    umap_n_neighbors : int, default 30
-    umap_min_dist : float, default 0.3
-    umap_metric : str, default "euclidean"
-    random_state : int, default 0
+        Only used when ``pca_path`` is not provided.
+    umap_n_neighbors, umap_min_dist, umap_metric, random_state :
+        Only used when ``umap_path`` is not provided.
     knn_n_neighbors : int, default 15
     knn_metric : str, default "euclidean"
     knn_weights : str, default "uniform"
@@ -180,64 +304,86 @@ def plot_and_save_projections(
     scatter_alpha : float, default 0.6
     figsize : tuple, default (6, 5)
     save_dir, save_prefix : str or None
-        If both given, saves a TIFF to
-        ``{save_dir}/{save_prefix}_{new_column_to_project}_projection.tiff``.
     dpi : int, default 300
     show : bool, default True
 
     Returns
     -------
     pd.DataFrame
-        Combined DataFrame (old cells first, then new) with all columns from
-        ``old_metadata`` and ``new_metadata``, plus:
-
-        * ``batch``                          — ``old_id`` or ``new_id``
-        * ``UMAP1_old``, ``UMAP2_old``       — computed UMAP for old cells (NaN for new)
-        * ``UMAP1_new``, ``UMAP2_new``       — projected UMAP for new cells (NaN for old)
-        * ``UMAP1_preRun``, ``UMAP2_preRun`` — from ``old_coordinates``
-          (only when ``override_old_coordinates=True``; NaN for new cells)
-        * ``{old_column_for_knn}_kNN``       — KNN predictions for new cells
-          (only when ``old_column_for_knn`` is provided; NaN for old cells)
+        Combined DataFrame with all columns from ``old_metadata`` /
+        ``new_metadata``, plus ``batch``, ``UMAP1_old``, ``UMAP2_old``,
+        ``UMAP1_new``, ``UMAP2_new``, ``UMAP1_preRun`` / ``UMAP2_preRun``
+        (when ``override_old_coordinates=True``), and
+        ``{old_column_for_knn}_kNN`` for new cells.
     """
     if umap_module is None:
         raise ImportError("umap-learn is required. Install with: pip install umap-learn")
 
-    # ------------------------------------------------------------------
-    # Step 1: Feature alignment
-    # ------------------------------------------------------------------
-    shared = [c for c in old_X.columns if c in new_X.columns]
-    if not shared:
-        raise ValueError("No shared features between old_X and new_X.")
-
     n_old = len(old_X)
     n_new = len(new_X)
 
-    old_arr = old_X[shared].values.astype(float)
-    new_arr = new_X[shared].values.astype(float)
+    # ------------------------------------------------------------------
+    # Step 1: Determine feature alignment and load / fit PCA + UMAP
+    # ------------------------------------------------------------------
+    if pca_path is not None and umap_path is not None:
+        with open(pca_path, "rb") as f:
+            pca_pkg = pickle.load(f)
+        pca = pca_pkg["pca"]
+        feature_names = pca_pkg["feature_names"]
+
+        with open(umap_path, "rb") as f:
+            reducer = pickle.load(f)
+
+        # Align new_X to the features the PCA was trained on
+        missing = [c for c in feature_names if c not in new_X.columns]
+        if missing:
+            raise ValueError(
+                f"new_X is missing {len(missing)} feature(s) required by the "
+                f"loaded PCA: {missing[:5]}{'...' if len(missing) > 5 else ''}"
+            )
+        new_arr = new_X[feature_names].values.astype(float)
+        Xp_new = pca.transform(new_arr)
+        U_new = reducer.transform(Xp_new)
+
+        # Old UMAP coords: use old_metadata if it already has them
+        old_has_umap = (
+            old_metadata is not None
+            and "UMAP1_old" in old_metadata.columns
+            and "UMAP2_old" in old_metadata.columns
+        )
+        if old_has_umap:
+            U_old = old_metadata[["UMAP1_old", "UMAP2_old"]].reset_index(drop=True).values
+        else:
+            old_arr = old_X[feature_names].values.astype(float)
+            Xp_old = pca.transform(old_arr)
+            U_old = reducer.transform(Xp_old)
+
+    else:
+        # Fit PCA and UMAP on old_X
+        shared = [c for c in old_X.columns if c in new_X.columns]
+        if not shared:
+            raise ValueError("No shared features between old_X and new_X.")
+
+        old_arr = old_X[shared].values.astype(float)
+        new_arr = new_X[shared].values.astype(float)
+
+        pca = PCA(n_components=n_components_pca, random_state=random_state)
+        Xp_old = pca.fit_transform(old_arr)
+        Xp_new = pca.transform(new_arr)
+
+        reducer = umap_module.UMAP(
+            n_neighbors=umap_n_neighbors,
+            min_dist=umap_min_dist,
+            metric=umap_metric,
+            random_state=random_state,
+            transform_seed=random_state,
+        ).fit(Xp_old)
+
+        U_old = reducer.transform(Xp_old)
+        U_new = reducer.transform(Xp_new)
 
     # ------------------------------------------------------------------
-    # Step 2: PCA — fit on old, transform both
-    # ------------------------------------------------------------------
-    pca = PCA(n_components=n_components_pca, random_state=random_state)
-    Xp_old = pca.fit_transform(old_arr)
-    Xp_new = pca.transform(new_arr)
-
-    # ------------------------------------------------------------------
-    # Step 3: UMAP — fit on old PCA, project new
-    # ------------------------------------------------------------------
-    reducer = umap_module.UMAP(
-        n_neighbors=umap_n_neighbors,
-        min_dist=umap_min_dist,
-        metric=umap_metric,
-        random_state=random_state,
-        transform_seed=random_state,
-    ).fit(Xp_old)
-
-    U_old = reducer.transform(Xp_old)   # (n_old, 2)
-    U_new = reducer.transform(Xp_new)   # (n_new, 2)
-
-    # ------------------------------------------------------------------
-    # Step 4: Build combined metadata DataFrame
+    # Step 2: Build combined metadata DataFrame
     # ------------------------------------------------------------------
     old_meta = (
         old_metadata.reset_index(drop=True).copy()
@@ -259,7 +405,7 @@ def plot_and_save_projections(
     merged = _merge_metadata_dfs(old_meta, new_meta, old_id, new_id)
 
     # ------------------------------------------------------------------
-    # Step 5: UMAP coordinate columns
+    # Step 3: UMAP coordinate columns (always set explicitly)
     # ------------------------------------------------------------------
     merged["UMAP1_old"] = np.concatenate([U_old[:, 0], np.full(n_new, np.nan)])
     merged["UMAP2_old"] = np.concatenate([U_old[:, 1], np.full(n_new, np.nan)])
@@ -276,9 +422,7 @@ def plot_and_save_projections(
         )
 
     # ------------------------------------------------------------------
-    # Step 6: KNN label transfer (old column → new cells)
-    # ref  = old cells (UMAP1_old / UMAP2_old + old_column_for_knn), drop NaN
-    # query = new cells (UMAP1_new / UMAP2_new)
+    # Step 4: KNN label transfer (old_column_for_knn → new cells)
     # ------------------------------------------------------------------
     if old_column_for_knn is not None:
         if old_metadata is None or old_column_for_knn not in old_metadata.columns:
@@ -292,12 +436,11 @@ def plot_and_save_projections(
         ref_df = (
             merged[merged["batch"] == old_id][
                 ["UMAP1_old", "UMAP2_old", old_column_for_knn]
-            ]
-            .dropna()
+            ].dropna()
         )
-        query_coords = (
-            merged[merged["batch"] == new_id][["UMAP1_new", "UMAP2_new"]].values
-        )
+        query_coords = merged[merged["batch"] == new_id][
+            ["UMAP1_new", "UMAP2_new"]
+        ].values
 
         if len(ref_df) > 0 and len(query_coords) > 0:
             knn = KNeighborsClassifier(
@@ -315,7 +458,7 @@ def plot_and_save_projections(
             print(merged.loc[merged["batch"] == new_id, knn_col].value_counts())
 
     # ------------------------------------------------------------------
-    # Step 7: Visualisation
+    # Step 5: Determine display coordinates for old cells
     # ------------------------------------------------------------------
     if override_old_coordinates and old_coordinates is not None:
         disp_old_u1 = np.asarray(old_coordinates[0])
@@ -324,15 +467,27 @@ def plot_and_save_projections(
         disp_old_u1 = U_old[:, 0]
         disp_old_u2 = U_old[:, 1]
 
+    # ------------------------------------------------------------------
+    # Step 6: Visualisation
+    # ------------------------------------------------------------------
+    groups = (
+        kde_hue_order if kde_hue_order is not None
+        else list(
+            merged.loc[merged["batch"] == new_id, new_column_to_project]
+            .dropna()
+            .unique()
+        )
+    )
+    colors_to_use = kde_colors if kde_colors is not None else _DEFAULT_COLORS
+
     fig, ax = plt.subplots(figsize=figsize)
 
     # Grey background — old cells
     ax.scatter(
         disp_old_u1, disp_old_u2,
-        s=scatter_s, alpha=0.3, color="grey", label=old_id, rasterized=True,
+        s=scatter_s, alpha=0.3, color="grey", rasterized=True,
     )
 
-    # New cells coloured by new_column_to_project
     new_rows = merged[merged["batch"] == new_id].copy()
 
     if kde and new_rows[new_column_to_project].notna().any():
@@ -346,22 +501,15 @@ def plot_and_save_projections(
             y_col="UMAP2",
             color_by=new_column_to_project,
             ax=ax,
-            colors=kde_colors,
-            hue_order=kde_hue_order,
+            colors=colors_to_use,
+            hue_order=groups,
             alpha=kde_alpha,
             fill=kde_fill,
             thresh=kde_thresh,
             n_contours=kde_n_contours,
             linewidth=kde_linewidth,
-            show_legend=kde_show_legend,
         )
     else:
-        groups = (
-            kde_hue_order if kde_hue_order is not None
-            else list(new_rows[new_column_to_project].dropna().unique())
-        )
-        colors_to_use = kde_colors if kde_colors is not None else _DEFAULT_COLORS
-
         for i, grp in enumerate(groups):
             mask = new_rows[new_column_to_project] == grp
             ax.scatter(
@@ -370,9 +518,11 @@ def plot_and_save_projections(
                 s=scatter_s,
                 alpha=scatter_alpha,
                 color=colors_to_use[i % len(colors_to_use)],
-                label=str(grp),
                 rasterized=True,
             )
+
+    # Combined legend: old_id (grey) + new groups
+    _build_legend(ax, old_id, groups, colors_to_use, show=kde_show_legend)
 
     ax.set_xlabel("UMAP1", fontsize=12, fontweight="bold", color="0.2")
     ax.set_ylabel("UMAP2", fontsize=12, fontweight="bold", color="0.2")
@@ -383,12 +533,9 @@ def plot_and_save_projections(
         spine.set_linewidth(0.8)
         spine.set_color("0.2")
     ax.tick_params(color="0.2", width=0.8)
-    if kde_show_legend:
-        ax.legend(markerscale=3, fontsize=8, frameon=False)
     plt.tight_layout()
 
     if save_dir and save_prefix:
-        import os
         os.makedirs(save_dir, exist_ok=True)
         plt.savefig(
             os.path.join(
