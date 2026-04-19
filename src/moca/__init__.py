@@ -10,7 +10,7 @@ from .plot_hist_overlays import plot_old_new_hist_overlays, clip_new_overlays
 from .umap_alignment_viz import plot_umap_alignment
 from .shared_heatmap import generate_shared_heatmap
 from .combined_space import create_combined_space
-from .projection_viz import plot_and_save_projections
+from .projection_viz import plot_and_save_projections, fit_old_embedding
 
 __all__ = [
     "align_conditions_to_states",
@@ -20,4 +20,5 @@ __all__ = [
     "generate_shared_heatmap",
     "create_combined_space",
     "plot_and_save_projections",
+    "fit_old_embedding",
 ]
